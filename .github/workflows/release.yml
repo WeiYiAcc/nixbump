@@ -33,6 +33,13 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
 
+
+      - name: Pack tarball
+        run: |
+          mkdir -p dist
+          mv nixbump-${{ matrix.goos }}-${{ matrix.goarch }} dist/nixbump
+          tar czf nixbump-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz -C dist nixbump
+          rm -rf dist
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
