@@ -1,13 +1,15 @@
 package main
 
 import (
-	"flag"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/spf13/cobra"
 )
 
 type updateResult struct {
@@ -18,78 +20,180 @@ type updateResult struct {
 	err        error
 }
 
-func main() {
-	dryRun := flag.Bool("dry-run", false, "show what would be done without making changes")
-	pkgName := flag.String("package", "", "update only the specified package")
-	pkgShort := flag.String("p", "", "update only the specified package (shorthand)")
-	list := flag.Bool("list", false, "list all discoverable packages")
-	listShort := flag.Bool("l", false, "list all discoverable packages (shorthand)")
-	pr := flag.Bool("pr", false, "create a PR for each updated package")
-	flag.Parse()
+// mtpSchema is the --mtp-describe payload (HN nr378: JSON describing
+// commands, args, types, examples; no server, no transport, no handshake).
+type mtpSchema struct {
+	Version  string       `json:"version"`
+	Name     string       `json:"name"`
+	Commands []mtpCommand `json:"commands"`
+}
 
-	if *pkgShort != "" && *pkgName == "" {
-		*pkgName = *pkgShort
-	}
-	if *listShort {
-		*list = true
-	}
+type mtpCommand struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Args        []string `json:"args,omitempty"`
+	Examples    []string `json:"examples,omitempty"`
+}
 
-	repoRoot, err := gitRevParseTopLevel()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	pkgsDir := filepath.Join(repoRoot, "pkgs")
-	if _, err := os.Stat(pkgsDir); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: no pkgs/ directory found in %s\n", repoRoot)
-		os.Exit(1)
-	}
-
-	packages, err := discoverPackages(pkgsDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if *list {
-		printPackageList(packages)
-		return
-	}
-
-	if *pkgName != "" {
-		filtered := filterPackages(packages, *pkgName)
-		if len(filtered) == 0 {
-			fmt.Fprintf(os.Stderr, "Error: package %q not found\n", *pkgName)
-			os.Exit(1)
-		}
-		packages = filtered
-	}
-
-	var failures int
-	for _, pkg := range packages {
-		var result updateResult
-		if *pr {
-			result = updateWithPR(pkg, repoRoot, *dryRun)
-		} else {
-			result = updateInPlace(pkg, repoRoot, *dryRun)
-		}
-
-		if result.err != nil {
-			fmt.Fprintf(os.Stderr, "  FAIL: %v\n", result.err)
-			failures++
-		} else if result.changed {
-			fmt.Printf("  %s -> %s\n", result.oldVersion, result.newVersion)
-		} else {
-			fmt.Printf("  up to date (%s)\n", result.oldVersion)
-		}
-	}
-
-	if failures > 0 {
-		os.Exit(1)
+func mtpDescribe() mtpSchema {
+	return mtpSchema{
+		Version: "1.0",
+		Name:    "nixbump",
+		Commands: []mtpCommand{
+			{Name: "list", Description: "list all discoverable packages"},
+			{Name: "check", Description: "dry-run: show available updates without changing files", Examples: []string{"nixbump check", "nixbump check atomic"}},
+			{Name: "update", Description: "update one package (or all) in-place", Args: []string{"[pkg]"}, Examples: []string{"nixbump update atomic"}},
+			{Name: "pr", Description: "update each outdated package and create a PR via git worktree + gh"},
+		},
 	}
 }
 
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "nixbump",
+		Short: "Auto-discover and update custom Nix packages (npm/GitHub/GitLab)",
+		Long: `nixbump discovers pkgs/*/nixbump.yaml configs, fetches the latest
+version from the configured source, and rewrites version + sha256 in the
+package derivation in-place. Configs may be sops-encrypted YAML.`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	root.CompletionOptions.HiddenDefaultCmd = true
+	return root
+}
+
+func requireRepoRoot() (string, error) {
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", fmt.Errorf("not inside a git repo: %w", err)
+	}
+	root := filepath.Clean(strings.TrimSpace(string(out)))
+	pkgsDir := filepath.Join(root, "pkgs")
+	if _, err := os.Stat(pkgsDir); err != nil {
+		return "", fmt.Errorf("pkgs/ not found under %s", root)
+	}
+	return root, nil
+}
+
+func loadPackages() ([]Package, error) {
+	root, err := requireRepoRoot()
+	if err != nil {
+		return nil, err
+	}
+	return discoverPackages(filepath.Join(root, "pkgs"))
+}
+
+func runList() error {
+	pkgs, err := loadPackages()
+	if err != nil {
+		return err
+	}
+	printPackageList(pkgs)
+	return nil
+}
+
+func runUpdate(pkgName string, dryRun, createPR bool) error {
+	pkgs, err := loadPackages()
+	if err != nil {
+		return err
+	}
+	if pkgName != "" {
+		pkgs = filterPackages(pkgs, pkgName)
+		if len(pkgs) == 0 {
+			return fmt.Errorf("package not found: %s", pkgName)
+		}
+	}
+	root, _ := requireRepoRoot()
+
+	var failures int
+	for _, pkg := range pkgs {
+		var res updateResult
+		if createPR {
+			res = updateWithPR(pkg, root, dryRun)
+		} else {
+			res = updateInPlace(pkg, root, dryRun)
+		}
+		if res.err != nil {
+			fmt.Printf("  FAIL: %v\n", res.err)
+			failures++
+		}
+	}
+	if failures > 0 {
+		os.Exit(1)
+	}
+	return nil
+}
+
+func main() {
+	root := newRootCmd()
+
+	// AI discovery (MTP): nixbump --mtp-describe
+	root.Flags().Bool("mtp-describe", false, "print MTP JSON schema for AI discovery and exit")
+
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "list all discoverable packages",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runList()
+		},
+	}
+
+	checkCmd := &cobra.Command{
+		Use:   "check [pkg]",
+		Short: "dry-run: show available updates without changing files",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			return runUpdate(name, true, false)
+		},
+	}
+
+	updateCmd := &cobra.Command{
+		Use:   "update [pkg]",
+		Short: "update one package (or all) in-place",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			return runUpdate(name, false, false)
+		},
+	}
+
+	prCmd := &cobra.Command{
+		Use:   "pr [pkg]",
+		Short: "update and create a PR per package (worktree + gh)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			return runUpdate(name, false, true)
+		},
+	}
+
+	root.AddCommand(listCmd, checkCmd, updateCmd, prCmd)
+
+	describe := false
+	for _, a := range os.Args[1:] {
+		if a == "--mtp-describe" {
+			describe = true
+		}
+	}
+	if describe {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(mtpDescribe())
+		return
+	}
+
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
 func printPackageList(packages []Package) {
 	for _, pkg := range packages {
 		nixPath := filepath.Join(pkg.Dir, "default.nix")

@@ -17,16 +17,20 @@ test:
 
 # List discoverable packages
 list: build
-    ./nixbump -list
+    ./nixbump list
 
-# Dry-run update everything
+# Dry-run everything (CI-safe: no file changes)
 check: build
-    ./nixbump -dry-run
+    ./nixbump check
 
 # Update one package
 update pkg: build
-    ./nixbump -package {{pkg}}
+    ./nixbump update {{pkg}}
 
 # Update all with PRs
 pr: build
-    ./nixbump -pr
+    ./nixbump pr
+
+# AI/MTP discovery (nr378 spec: --mtp-describe -> JSON schema)
+mtp: build
+    ./nixbump --mtp-describe
