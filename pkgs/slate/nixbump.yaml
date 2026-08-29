@@ -1,0 +1,6 @@
+# slate (GitHub release tarball 跟踪)
+# 迁移自 ~/home-manager/npm-tools/slate.nix
+source: github
+owner: RandomLabsXYZ
+repo: slate
+strip_prefix: v

@@ -1,0 +1,4 @@
+# atomic (npm registry 版本跟踪)
+# 迁移自 ~/home-manager/npm-tools/update.nix 的硬编码策略
+source: npm
+package: atomic

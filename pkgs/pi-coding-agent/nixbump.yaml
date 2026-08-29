@@ -1,0 +1,3 @@
+# pi-coding-agent 由 nixpkgs 跟踪,不在此更新版本
+# 迁移自 ~/home-manager/npm-tools/pi-coding-agent.nix (nixpkgs 跟踪)
+source: nix-update

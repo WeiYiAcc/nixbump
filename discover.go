@@ -13,6 +13,10 @@ type Package struct {
 	Config *Config
 }
 
+// configFileNames: yaml is the source of truth (comment-friendly, sops-native);
+// json kept for backward compatibility with upstream nixbump.
+var configFileNames = []string{"nixbump.yaml", "nixbump.yml", "nixbump.json"}
+
 func discoverPackages(pkgsDir string) ([]Package, error) {
 	entries, err := os.ReadDir(pkgsDir)
 	if err != nil {
@@ -24,8 +28,15 @@ func discoverPackages(pkgsDir string) ([]Package, error) {
 		if !e.IsDir() {
 			continue
 		}
-		cfgPath := filepath.Join(pkgsDir, e.Name(), "nixbump.json")
-		if _, err := os.Stat(cfgPath); err != nil {
+		var cfgPath string
+		for _, name := range configFileNames {
+			p := filepath.Join(pkgsDir, e.Name(), name)
+			if _, err := os.Stat(p); err == nil {
+				cfgPath = p
+				break
+			}
+		}
+		if cfgPath == "" {
 			continue
 		}
 		cfg, err := parseConfig(cfgPath)
